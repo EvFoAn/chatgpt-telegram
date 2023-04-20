@@ -4,6 +4,9 @@ import os
 import itertools
 import asyncio
 
+import httpx
+from googlesearch import search
+
 import telegram
 from uuid import uuid4
 from telegram import constants, BotCommandScopeAllGroupChats
@@ -17,6 +20,13 @@ from pydub import AudioSegment
 from openai_helper import OpenAIHelper, localized_text
 from usage_tracker import UsageTracker
 
+from telegram.ext import CommandHandler
+import requests
+import re
+
+from aiogram.types import ChatActions
+import aiohttp
+import asyncio
 
 def message_text(message: Message) -> str:
     """
@@ -58,8 +68,10 @@ class ChatGPTTelegramBot:
             BotCommand(command='reset', description=localized_text('reset_description', bot_language)),
             BotCommand(command='image', description=localized_text('image_description', bot_language)),
             BotCommand(command='stats', description=localized_text('stats_description', bot_language)),
-            BotCommand(command='resend', description=localized_text('resend_description', bot_language))
-        ]
+            BotCommand(command='resend', description=localized_text('resend_description', bot_language)),
+            BotCommand(command='google', description=localized_text('google_search', bot_language)),
+            BotCommand(command='analyze', description=localized_text('analyze_page', bot_language))
+            ]
         self.group_commands = [
                                   BotCommand(command='chat',
                                              description=localized_text('chat_description', bot_language))
@@ -69,6 +81,179 @@ class ChatGPTTelegramBot:
         self.usage = {}
         self.last_message = {}
         self.inline_queries_cache = {}
+
+
+    async def google(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+        OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
+        openai_endpoint = os.environ['OPENAI_ENDPOINT_SEARCH']
+        google_api_key = os.environ['GOOGLE_API_KEY']
+        custom_search_engine_id = os.environ['GOOGLE_ENGINE_ID']
+        google_search_base_url = os.environ['GOOGLE_SEARCH_BASE_URL']
+
+        response_data = {}
+        previous_messages = []
+
+        chat_id = update.message.chat_id
+        google_query = message_text(update.message)
+        try:
+          if google_query == '':
+             await context.bot.send_message(chat_id=chat_id,
+                                           text=localized_text('google_no_prompt', self.config['bot_language']))
+             return
+        except:
+            pass
+
+        async def search_query(query):
+                google_search_base_url = os.environ['GOOGLE_SEARCH_BASE_URL']
+                params = {
+                        "key": google_api_key,
+                        "cx": custom_search_engine_id,
+                        "q": query,
+                        "num": os.environ['GOOGLE_SEARCH_PAGES'],
+                        "gl": os.environ['GOOGLE_COUNTRY_FIND'],
+                        "hl": os.environ['GOOGLE_LANG_SEARCH']
+                }
+                try:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.get(google_search_base_url, params=params)
+                        response.raise_for_status()
+                        return response.json()["items"]
+                except httpx.RequestError as error:
+                     print(f"Error in search query: {error}")
+                     return None
+
+        chat_id = update.message.chat_id
+        message = update.message.text.lower()
+        search_results = await search_query(message[7:])
+
+
+        if search_results and len(search_results) > 0:
+            links_to_analyze = "\n".join([result["link"] for result in search_results])
+            title = "\n".join([f"- {result['title']}" for result in search_results])
+            tl = re.sub(r"[\-\"\#\$\%\&\(\)\*\+\/:;<=>\?@\^_\{\|\}\~]", "", title)
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatActions.TYPING)
+
+            async def make_request():
+
+                a001 = localized_text('gfirst_string', self.config['bot_language'])
+                a002 = localized_text('gsecont_string', self.config['bot_language'])
+                a003 = localized_text('gthird_string', self.config['bot_language'])
+                a004 = localized_text('gfourth_string', self.config['bot_language'])
+                a005 = localized_text('gfifth_string', self.config['bot_language'])
+
+                request_body = {
+                    	"model": os.environ['OPENAI_MODEL'],
+                	    "messages": [
+                    	    {"role": "system", "content": "You are a helpful assistant."},
+                	        {
+                    	        "role": "user",
+                    	        "content": a001 + links_to_analyze + a002 + a003 + tl + a004 + links_to_analyze + a005
+                	        },
+            	        ],
+            	        "temperature": 0.0,
+        	    }
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                            openai_endpoint,
+                            json=request_body,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                                },
+                            ) as response:
+                        response_data = await response.json()
+                        return response_data
+
+            response_data = await make_request()
+            response_body = response_data
+            if "choices" in response_body and len(response_body["choices"]) > 0:
+                ai_answer = response_body['choices'][0]['message']['content']
+                ai_answer = ai_answer.replace("```", "")
+                wrapped_text = f"{ai_answer}"
+                ai_reply = wrapped_text
+                last_response = ai_reply
+                filtered_reply = last_response
+
+                from telegram.constants import ParseMode
+
+                await context.bot.send_message(chat_id=chat_id, text=filtered_reply, parse_mode=ParseMode.MARKDOWN )
+
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="Не удалось найти информацию.")
+
+
+    async def analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+        OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
+        openai_endpoint = os.environ['OPENAI_ENDPOINT_SEARCH']
+
+        response_data = {}
+        previous_messages = []
+
+        chat_id = update.message.chat_id
+        message = update.message.text.lower()
+        search_results = message[8:]
+
+        if search_results:
+            links_to_analyze = search_results
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatActions.TYPING)
+
+            async def make_request():
+
+                ganalyzePageStart = localized_text('ganalyzePageStart', self.config['bot_language'])
+                ganalyzePageEnd = localized_text('ganalyzePageEnd', self.config['bot_language'])
+
+                request_body = {
+                    	"model": os.environ['OPENAI_MODEL'],
+                	    "messages": [
+                    	    {"role": "system", "content": "You are a helpful assistant."},
+                	        {
+                    	        "role": "user",
+                    	        "content": ganalyzePageStart + links_to_analyze + ganalyzePageEnd
+                	        },
+            	        ],
+            	        "temperature": 0.0,
+        	    }
+
+                print(request_body)
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                            openai_endpoint,
+                            json=request_body,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                                },
+                            ) as response:
+                        response_data = await response.json()
+                        return response_data
+
+            response_data = await make_request()
+            response_body = response_data
+            if "choices" in response_body and len(response_body["choices"]) > 0:
+                ai_answer = response_body['choices'][0]['message']['content']
+                ai_answer = ai_answer.replace("```", "")
+                wrapped_text = f"{ai_answer}"
+                ai_reply = wrapped_text
+                last_response = ai_reply
+                filtered_reply = last_response
+
+                from telegram.constants import ParseMode
+
+                await context.bot.send_message(chat_id=chat_id, text=filtered_reply, parse_mode=ParseMode.MARKDOWN )
+
+        else:
+            chat_id = update.message.chat_id
+            google_query = message_text(update.message)
+            try:
+                if google_query == '':
+                    await context.bot.send_message(chat_id=chat_id,
+                                           text=localized_text('google_no_analyze', self.config['bot_language']))
+            except:
+                pass
 
     async def help(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """
@@ -171,10 +356,8 @@ class ChatGPTTelegramBot:
         if chat_id not in self.last_message:
             logging.warning(f'User {update.message.from_user.name} (id: {update.message.from_user.id})'
                             f' does not have anything to resend')
-            await update.effective_message.reply_text(
-                message_thread_id=self.get_thread_id(update),
-                text=localized_text('resend_failed', self.config['bot_language'])
-            )
+            await context.bot.send_message(chat_id=chat_id,
+                                           text=localized_text('resend_failed', self.config['bot_language']))
             return
 
         # Update message text, clear self.last_message and send the request to prompt
@@ -201,10 +384,7 @@ class ChatGPTTelegramBot:
         chat_id = update.effective_chat.id
         reset_content = message_text(update.message)
         self.openai.reset_chat_history(chat_id=chat_id, content=reset_content)
-        await update.effective_message.reply_text(
-           message_thread_id=self.get_thread_id(update),
-           text=localized_text('reset_done', self.config['bot_language'])
-        )
+        await context.bot.send_message(chat_id=chat_id, text=localized_text('reset_done', self.config['bot_language']))
 
     async def image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -217,10 +397,8 @@ class ChatGPTTelegramBot:
         chat_id = update.effective_chat.id
         image_query = message_text(update.message)
         if image_query == '':
-            await update.effective_message.reply_text(
-               message_thread_id=self.get_thread_id(update),
-               text=localized_text('image_no_prompt', self.config['bot_language'])
-            )
+            await context.bot.send_message(chat_id=chat_id,
+                                           text=localized_text('image_no_prompt', self.config['bot_language']))
             return
 
         logging.info(f'New image generation request received from user {update.message.from_user.name} '
@@ -229,7 +407,8 @@ class ChatGPTTelegramBot:
         async def _generate():
             try:
                 image_url, image_size = await self.openai.generate_image(prompt=image_query)
-                await update.effective_message.reply_photo(
+                await context.bot.send_photo(
+                    chat_id=chat_id,
                     reply_to_message_id=self.get_reply_to_message_id(update),
                     photo=image_url
                 )
@@ -242,8 +421,8 @@ class ChatGPTTelegramBot:
 
             except Exception as e:
                 logging.exception(e)
-                await update.effective_message.reply_text(
-                    message_thread_id=self.get_thread_id(update),
+                await context.bot.send_message(
+                    chat_id=chat_id,
                     reply_to_message_id=self.get_reply_to_message_id(update),
                     text=f"{localized_text('image_fail', self.config['bot_language'])}: {str(e)}",
                     parse_mode=constants.ParseMode.MARKDOWN
@@ -273,8 +452,8 @@ class ChatGPTTelegramBot:
                 await media_file.download_to_drive(filename)
             except Exception as e:
                 logging.exception(e)
-                await update.effective_message.reply_text(
-                    message_thread_id=self.get_thread_id(update),
+                await context.bot.send_message(
+                    chat_id=chat_id,
                     reply_to_message_id=self.get_reply_to_message_id(update),
                     text=(
                         f"{localized_text('media_download_fail', bot_language)[0]}: "
@@ -293,8 +472,8 @@ class ChatGPTTelegramBot:
 
             except Exception as e:
                 logging.exception(e)
-                await update.effective_message.reply_text(
-                    message_thread_id=self.get_thread_id(update),
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
                     reply_to_message_id=self.get_reply_to_message_id(update),
                     text=localized_text('media_type_fail', bot_language)
                 )
@@ -328,8 +507,8 @@ class ChatGPTTelegramBot:
                     chunks = self.split_into_chunks(transcript_output)
 
                     for index, transcript_chunk in enumerate(chunks):
-                        await update.effective_message.reply_text(
-                            message_thread_id=self.get_thread_id(update),
+                        await context.bot.send_message(
+                            chat_id=chat_id,
                             reply_to_message_id=self.get_reply_to_message_id(update) if index == 0 else None,
                             text=transcript_chunk,
                             parse_mode=constants.ParseMode.MARKDOWN
@@ -352,8 +531,8 @@ class ChatGPTTelegramBot:
                     chunks = self.split_into_chunks(transcript_output)
 
                     for index, transcript_chunk in enumerate(chunks):
-                        await update.effective_message.reply_text(
-                            message_thread_id=self.get_thread_id(update),
+                        await context.bot.send_message(
+                            chat_id=chat_id,
                             reply_to_message_id=self.get_reply_to_message_id(update) if index == 0 else None,
                             text=transcript_chunk,
                             parse_mode=constants.ParseMode.MARKDOWN
@@ -361,8 +540,8 @@ class ChatGPTTelegramBot:
 
             except Exception as e:
                 logging.exception(e)
-                await update.effective_message.reply_text(
-                    message_thread_id=self.get_thread_id(update),
+                await context.bot.send_message(
+                    chat_id=chat_id,
                     reply_to_message_id=self.get_reply_to_message_id(update),
                     text=f"{localized_text('transcribe_fail', bot_language)}: {str(e)}",
                     parse_mode=constants.ParseMode.MARKDOWN
@@ -393,6 +572,7 @@ class ChatGPTTelegramBot:
         prompt = message_text(update.message)
         self.last_message[chat_id] = prompt
 
+
         if self.is_group_chat(update):
             trigger_keyword = self.config['group_trigger_keyword']
             if prompt.lower().startswith(trigger_keyword.lower()):
@@ -408,10 +588,7 @@ class ChatGPTTelegramBot:
             total_tokens = 0
 
             if self.config['stream']:
-                await update.effective_message.reply_chat_action(
-                    action=constants.ChatAction.TYPING,
-                    message_thread_id=self.get_thread_id(update)
-                )
+                await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
 
                 stream_response = self.openai.get_chat_response_stream(chat_id=chat_id, query=prompt)
                 i = 0
@@ -435,8 +612,8 @@ class ChatGPTTelegramBot:
                             except:
                                 pass
                             try:
-                                sent_message = await update.effective_message.reply_text(
-                                    message_thread_id=self.get_thread_id(update),
+                                sent_message = await context.bot.send_message(
+                                    chat_id=sent_message.chat_id,
                                     text=content if len(content) > 0 else "..."
                                 )
                             except:
@@ -451,8 +628,8 @@ class ChatGPTTelegramBot:
                             if sent_message is not None:
                                 await context.bot.delete_message(chat_id=sent_message.chat_id,
                                                                  message_id=sent_message.message_id)
-                            sent_message = await update.effective_message.reply_text(
-                                message_thread_id=self.get_thread_id(update),
+                            sent_message = await context.bot.send_message(
+                                chat_id=chat_id,
                                 reply_to_message_id=self.get_reply_to_message_id(update),
                                 text=content
                             )
@@ -497,16 +674,16 @@ class ChatGPTTelegramBot:
 
                     for index, chunk in enumerate(chunks):
                         try:
-                            await update.effective_message.reply_text(
-                                message_thread_id=self.get_thread_id(update),
+                            await context.bot.send_message(
+                                chat_id=chat_id,
                                 reply_to_message_id=self.get_reply_to_message_id(update) if index == 0 else None,
                                 text=chunk,
                                 parse_mode=constants.ParseMode.MARKDOWN
                             )
                         except Exception:
                             try:
-                                await update.effective_message.reply_text(
-                                    message_thread_id=self.get_thread_id(update),
+                                await context.bot.send_message(
+                                    chat_id=chat_id,
                                     reply_to_message_id=self.get_reply_to_message_id(update) if index == 0 else None,
                                     text=chunk
                                 )
@@ -519,8 +696,8 @@ class ChatGPTTelegramBot:
 
         except Exception as e:
             logging.exception(e)
-            await update.effective_message.reply_text(
-                message_thread_id=self.get_thread_id(update),
+            await context.bot.send_message(
+                chat_id=chat_id,
                 reply_to_message_id=self.get_reply_to_message_id(update),
                 text=f"{localized_text('chat_fail', self.config['bot_language'])} {str(e)}",
                 parse_mode=constants.ParseMode.MARKDOWN
@@ -710,8 +887,7 @@ class ChatGPTTelegramBot:
             try:
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
-                    message_id=int(message_id) if not is_inline else None,
-                    inline_message_id=message_id if is_inline else None,
+                    message_id=message_id,
                     text=text
                 )
             except Exception as e:
@@ -730,9 +906,7 @@ class ChatGPTTelegramBot:
         task = context.application.create_task(coroutine(), update=update)
         while not task.done():
             if not is_inline:
-                context.application.create_task(
-                    update.effective_chat.send_action(chat_action, message_thread_id=self.get_thread_id(update))
-                )
+                context.application.create_task(update.effective_chat.send_action(chat_action))
             try:
                 await asyncio.wait_for(asyncio.shield(task), 4.5)
             except asyncio.TimeoutError:
@@ -743,8 +917,8 @@ class ChatGPTTelegramBot:
         Sends the disallowed message to the user.
         """
         if not is_inline:
-            await update.effective_message.reply_text(
-                message_thread_id=self.get_thread_id(update),
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
                 text=self.disallowed_message,
                 disable_web_page_preview=True
             )
@@ -757,8 +931,8 @@ class ChatGPTTelegramBot:
         Sends the budget reached message to the user.
         """
         if not is_inline:
-            await update.effective_message.reply_text(
-                message_thread_id=self.get_thread_id(update),
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
                 text=self.budget_limit_message
             )
         else:
@@ -770,14 +944,6 @@ class ChatGPTTelegramBot:
         Handles errors in the telegram-python-bot library.
         """
         logging.error(f'Exception while handling an update: {context.error}')
-
-    def get_thread_id(self, update: Update) -> int | None:
-        """
-        Gets the message thread id for the update, if any
-        """
-        if update.effective_message and update.effective_message.is_topic_message:
-            return update.effective_message.message_thread_id
-        return None
 
     def get_stream_cutoff_values(self, update: Update, content: str) -> int:
         """
@@ -1011,6 +1177,8 @@ class ChatGPTTelegramBot:
         application.add_handler(CommandHandler('start', self.help))
         application.add_handler(CommandHandler('stats', self.stats))
         application.add_handler(CommandHandler('resend', self.resend))
+        application.add_handler(CommandHandler('google', self.google))
+        application.add_handler(CommandHandler('analyze', self.analyze))
         application.add_handler(CommandHandler(
             'chat', self.prompt, filters=filters.ChatType.GROUP | filters.ChatType.SUPERGROUP)
         )
@@ -1023,6 +1191,8 @@ class ChatGPTTelegramBot:
             constants.ChatType.GROUP, constants.ChatType.SUPERGROUP, constants.ChatType.PRIVATE
         ]))
         application.add_handler(CallbackQueryHandler(self.handle_callback_inline_query))
+
+
 
         application.add_error_handler(self.error_handler)
 
